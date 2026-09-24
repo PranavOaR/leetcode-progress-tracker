@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
-import { collection, doc, getDoc, getDocs, setDoc, writeBatch } from "firebase/firestore";
+import { GoogleAuthProvider, deleteUser, onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import { collection, deleteDoc, doc, getDoc, getDocs, setDoc, writeBatch } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 
 type Difficulty = "Easy" | "Medium" | "Hard";
-type View = "overview" | "topics" | "revision" | "progress";
+type View = "overview" | "topics" | "revision" | "progress" | "settings";
 
 type Problem = {
   id: number;
@@ -30,36 +30,60 @@ type ImportedStats = {
   streak: number;
   totalActiveDays: number;
   submissionCalendar: string;
+  topicStats: Array<{ name: string; slug: string; solved: number }>;
 };
 
-const seedProblems: Problem[] = [
-  { id: 1, title: "Longest Substring Without Repeating Characters", slug: "longest-substring-without-repeating-characters", topics: ["Strings", "Sliding Window"], leetDifficulty: "Medium", personalDifficulty: "Hard", lastSolved: "Sep 22, 2026", nextReview: "Today", status: "Due today", confidence: 58, reviewed: false },
-  { id: 2, title: "Product of Array Except Self", slug: "product-of-array-except-self", topics: ["Arrays", "Prefix Sum"], leetDifficulty: "Medium", personalDifficulty: "Medium", lastSolved: "Sep 20, 2026", nextReview: "Today", status: "Due today", confidence: 73, reviewed: false },
-  { id: 3, title: "Merge Intervals", slug: "merge-intervals", topics: ["Arrays", "Sorting"], leetDifficulty: "Medium", personalDifficulty: "Medium", lastSolved: "Sep 18, 2026", nextReview: "Tomorrow", status: "Due soon", confidence: 81, reviewed: false },
-  { id: 4, title: "Binary Tree Level Order Traversal", slug: "binary-tree-level-order-traversal", topics: ["Trees", "BFS"], leetDifficulty: "Medium", personalDifficulty: "Easy", lastSolved: "Sep 16, 2026", nextReview: "Sep 28", status: "Scheduled", confidence: 89, reviewed: true },
-  { id: 5, title: "Coin Change", slug: "coin-change", topics: ["Dynamic Programming"], leetDifficulty: "Medium", personalDifficulty: "Hard", lastSolved: "Sep 14, 2026", nextReview: "Sep 28", status: "Scheduled", confidence: 44, reviewed: false },
-  { id: 6, title: "Number of Islands", slug: "number-of-islands", topics: ["Graphs", "DFS"], leetDifficulty: "Medium", personalDifficulty: "Hard", lastSolved: "Sep 11, 2026", nextReview: "Sep 30", status: "Scheduled", confidence: 67, reviewed: true },
-];
+const topicColors = ["blue", "violet", "orange", "green", "pink", "cyan"];
 
-const topicData = [
-  { name: "Arrays", count: 42, total: 60, color: "blue", trend: "+8%" },
-  { name: "Strings", count: 28, total: 45, color: "violet", trend: "+12%" },
-  { name: "Trees", count: 19, total: 40, color: "orange", trend: "+4%" },
-  { name: "Graphs", count: 12, total: 35, color: "green", trend: "+16%" },
-  { name: "Dynamic Programming", count: 8, total: 30, color: "pink", trend: "+2%" },
-  { name: "Two Pointers", count: 16, total: 22, color: "cyan", trend: "+10%" },
-];
-
-function getSavedProblems() {
-  if (typeof window === "undefined") return seedProblems;
-  const saved = window.localStorage.getItem("brainstorm-problems");
-  return saved ? JSON.parse(saved) as Problem[] : seedProblems;
+function deriveTopicData(problems: Problem[], imported: boolean, topicStats: ImportedStats["topicStats"] = []) {
+  if (topicStats.length) {
+    const maxSolved = Math.max(...topicStats.map((topic) => topic.solved), 1);
+    return topicStats.slice().sort((a, b) => b.solved - a.solved).map((topic, index) => ({
+      name: topic.name,
+      count: topic.solved,
+      total: 0,
+      color: topicColors[index % topicColors.length],
+      trend: `${topic.solved} solved`,
+      label: "solved",
+      percentage: Math.round((topic.solved / maxSolved) * 100),
+      percentageLabel: "relative",
+    }));
+  }
+  if (!problems.length) return [];
+  const counts = new Map<string, number>();
+  problems.forEach((problem) => problem.topics.forEach((topic) => counts.set(topic, (counts.get(topic) || 0) + 1)));
+  const total = problems.length;
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).map(([name, count], index) => ({
+    name,
+    count,
+    total,
+    color: topicColors[index % topicColors.length],
+    trend: imported ? `${Math.round((count / total) * 100)}% share` : `+${Math.max(2, index + 4)}%`,
+    label: imported ? "tracked" : "problems",
+    percentage: Math.round((count / total) * 100),
+  }));
 }
 
-function getSavedProfile() {
-  if (typeof window === "undefined") return { url: "https://leetcode.com/u/pranav/", name: "pranav" };
-  const saved = window.localStorage.getItem("brainstorm-profile");
-  return saved ? JSON.parse(saved) as { url: string; name: string } : { url: "https://leetcode.com/u/pranav/", name: "pranav" };
+function getActivityBars(calendar: string | undefined) {
+  const fallback = Array.from({ length: 12 }, (_, index) => ({ height: 4, label: `Week ${index + 1}`, value: 0 }));
+  if (!calendar) return fallback;
+  try {
+    const daily = Object.entries(JSON.parse(calendar) as Record<string, number>);
+    const now = Date.now();
+    const weeks = Array.from({ length: 12 }, (_, index) => {
+      const end = now - (11 - index) * 7 * 24 * 60 * 60 * 1000;
+      const start = end - 7 * 24 * 60 * 60 * 1000;
+      const value = daily.reduce((sum, [timestamp, count]) => {
+        const time = Number(timestamp) * 1000;
+        return time >= start && time < end ? sum + Number(count) : sum;
+      }, 0);
+      return { value, label: new Date(start).toLocaleDateString("en-US", { month: "short", day: "2-digit" }) };
+    });
+    const max = Math.max(...weeks.map((week) => week.value), 1);
+    return weeks.map((week) => ({ ...week, height: week.value ? Math.max(10, Math.round((week.value / max) * 100)) : 4 }));
+  } catch {
+    return fallback;
+  }
 }
 
 function Icon({ name }: { name: string }) {
@@ -82,16 +106,22 @@ function Icon({ name }: { name: string }) {
 
 export default function Home() {
   const [view, setView] = useState<View>("overview");
-  const [problems, setProblems] = useState<Problem[]>(getSavedProblems);
-  const savedProfile = getSavedProfile();
-  const [profileUrl, setProfileUrl] = useState(savedProfile.url);
-  const [profileName, setProfileName] = useState(savedProfile.name);
+  const [problems, setProblems] = useState<Problem[]>([]);
+  const [profileUrl, setProfileUrl] = useState("");
+  const [profileName, setProfileName] = useState("your profile");
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [accountReady, setAccountReady] = useState(false);
+  const [connectedUsername, setConnectedUsername] = useState<string | null>(null);
   const [importedStats, setImportedStats] = useState<ImportedStats | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [synced, setSynced] = useState(false);
   const [search, setSearch] = useState("");
   const [toast, setToast] = useState("");
+  const [connectError, setConnectError] = useState("");
+  const [revisionTopic, setRevisionTopic] = useState("All topics");
+  const [topicFocus, setTopicFocus] = useState<string | null>(null);
+  const [darkMode, setDarkMode] = useState(false);
 
   const flash = (message: string) => {
     setToast(message);
@@ -99,8 +129,39 @@ export default function Home() {
   };
 
   useEffect(() => {
+    window.setTimeout(() => {
+      const savedProblems = window.localStorage.getItem("brainstorm-problems");
+      const savedProfile = window.localStorage.getItem("brainstorm-profile");
+      const savedStats = window.localStorage.getItem("brainstorm-stats");
+      const savedTheme = window.localStorage.getItem("brainstorm-theme");
+      if (savedStats && savedProblems) setProblems(JSON.parse(savedProblems) as Problem[]);
+      if (!savedStats) window.localStorage.removeItem("brainstorm-problems");
+      if (savedStats && savedProfile) {
+        const profile = JSON.parse(savedProfile) as { url: string; name: string };
+        setProfileUrl(profile.url);
+        setProfileName(profile.name);
+      }
+      if (!savedStats) {
+        window.localStorage.removeItem("brainstorm-profile");
+        setProfileUrl("");
+      }
+      if (savedStats) setImportedStats(JSON.parse(savedStats) as ImportedStats);
+      if (savedTheme === "dark") setDarkMode(true);
+    }, 0);
+  }, []);
+
+  useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
-      window.setTimeout(() => setAuthUser(nextUser), 0);
+      window.setTimeout(() => {
+        setAuthUser(nextUser);
+        setAuthReady(true);
+        if (!nextUser) {
+          setAccountReady(true);
+          setConnectedUsername(null);
+        } else {
+          setAccountReady(false);
+        }
+      }, 0);
     });
     return unsubscribe;
   }, []);
@@ -112,16 +173,25 @@ export default function Home() {
         const userSnapshot = await getDoc(doc(db, "users", authUser.uid));
         const cloudProfile = userSnapshot.data();
         if (cloudProfile?.profileUrl) setProfileUrl(cloudProfile.profileUrl as string);
-        if (cloudProfile?.leetcodeUsername) setProfileName(cloudProfile.leetcodeUsername as string);
-        if (cloudProfile?.stats) setImportedStats(cloudProfile.stats as ImportedStats);
+        if (cloudProfile?.leetcodeUsername) {
+          setProfileName(cloudProfile.leetcodeUsername as string);
+          setConnectedUsername(cloudProfile.leetcodeUsername as string);
+        }
+        if (cloudProfile?.stats) {
+          setImportedStats(cloudProfile.stats as ImportedStats);
+          window.localStorage.setItem("brainstorm-stats", JSON.stringify(cloudProfile.stats));
+        }
+        setSynced(Boolean(cloudProfile));
         const problemSnapshot = await getDocs(collection(db, "users", authUser.uid, "problems"));
         if (!problemSnapshot.empty) {
           const cloudProblems = problemSnapshot.docs.map((item) => item.data() as Problem);
           setProblems(cloudProblems);
           window.localStorage.setItem("brainstorm-problems", JSON.stringify(cloudProblems));
         }
+        setAccountReady(true);
       } catch {
         flash("Signed in, but the cloud workspace could not be loaded yet");
+        setAccountReady(true);
       }
     };
     loadCloudWorkspace();
@@ -163,9 +233,38 @@ export default function Home() {
     flash("Signed out — local workspace remains available");
   };
 
+  const deleteBrainstormAccount = async () => {
+    if (!authUser || !window.confirm("Delete your Brainstorm account and all saved progress? This cannot be undone.")) return;
+    try {
+      const problemSnapshot = await getDocs(collection(db, "users", authUser.uid, "problems"));
+      for (let index = 0; index < problemSnapshot.docs.length; index += 450) {
+        const batch = writeBatch(db);
+        problemSnapshot.docs.slice(index, index + 450).forEach((problem) => batch.delete(problem.ref));
+        await batch.commit();
+      }
+      await deleteDoc(doc(db, "users", authUser.uid));
+      await deleteUser(authUser);
+      window.localStorage.removeItem("brainstorm-problems");
+      window.localStorage.removeItem("brainstorm-profile");
+      window.localStorage.removeItem("brainstorm-stats");
+      setProblems([]);
+      setImportedStats(null);
+      setConnectedUsername(null);
+      flash("Your Brainstorm account was deleted");
+    } catch {
+      flash("Account deletion needs a recent Google sign-in. Sign in again and retry.");
+    }
+  };
+
   const importProfile = async () => {
-    const match = profileUrl.match(/leetcode\.com\/u\/([^/]+)/i) || profileUrl.match(/leetcode\.com\/([^/]+)/i);
-    const name = match?.[1] || "your profile";
+    setConnectError("");
+    const rawProfile = profileUrl.trim();
+    const match = rawProfile.match(/leetcode\.com\/u\/([^/?#]+)/i) || rawProfile.match(/leetcode\.com\/([^/?#]+)/i);
+    const name = connectedUsername || match?.[1] || rawProfile.replace(/^@/, "");
+    if (!name || !/^[a-zA-Z0-9_-]{1,40}$/.test(name)) {
+      setConnectError("Enter a valid public LeetCode profile URL.");
+      return;
+    }
     setSyncing(true);
     try {
       const response = await fetch(`/api/leetcode/profile?username=${encodeURIComponent(name)}`);
@@ -192,17 +291,24 @@ export default function Home() {
       const nextProblems = importedProblems.length ? importedProblems : problems;
       setProfileName(payload.username);
       setImportedStats(payload.stats);
+      window.localStorage.setItem("brainstorm-stats", JSON.stringify(payload.stats));
       setSynced(true);
       saveProblems(nextProblems);
       window.localStorage.setItem("brainstorm-profile", JSON.stringify({ url: profileUrl, name: payload.username }));
       if (authUser) {
         await saveWorkspaceToCloud(authUser, payload.username, payload.stats, nextProblems);
+        setConnectedUsername(payload.username);
         flash(`Imported ${payload.username} and saved it to Firestore`);
       } else {
         flash(`Imported ${payload.username}. Sign in with Google to save it to Firestore.`);
       }
     } catch (error) {
-      flash(error instanceof Error ? error.message : "Unable to import this profile");
+      const message = error instanceof Error ? error.message : "Unable to import this profile";
+      const friendlyMessage = message.toLowerCase().includes("permission")
+        ? "LeetCode was reached, but Firestore rejected the save. Publish the firestore.rules file to your Firebase project, then try again."
+        : message;
+      setConnectError(friendlyMessage);
+      flash(friendlyMessage);
     } finally {
       setSyncing(false);
     }
@@ -224,9 +330,23 @@ export default function Home() {
   };
 
   const dueCount = problems.filter((problem) => !problem.reviewed && (problem.status === "Due today" || problem.status === "Due soon")).length;
-  const solvedCount = importedStats?.solved || 157;
+  const solvedCount = importedStats?.solved ?? 0;
+  const isImported = Boolean(importedStats);
+  const dynamicTopics = isImported ? deriveTopicData(problems, true, importedStats?.topicStats || []) : [];
+  const activityBars = getActivityBars(importedStats?.submissionCalendar);
+  const topicNames = Array.from(new Set(problems.flatMap((problem) => problem.topics))).sort();
   const filteredProblems = problems.filter((problem) => problem.title.toLowerCase().includes(search.toLowerCase()) || problem.topics.join(" ").toLowerCase().includes(search.toLowerCase()));
+  const revisionProblems = revisionTopic === "All topics" ? filteredProblems : filteredProblems.filter((problem) => problem.topics.includes(revisionTopic));
+  const trackedMastery = problems.length ? Math.round(problems.reduce((sum, problem) => sum + problem.confidence, 0) / problems.length) : 0;
+  const topicMastery = isImported
+    ? problems.length ? `${trackedMastery}%` : `${importedStats?.topicStats?.length || 0}`
+    : "—";
 
+  const toggleDarkMode = () => {
+    const next = !darkMode;
+    setDarkMode(next);
+    window.localStorage.setItem("brainstorm-theme", next ? "dark" : "light");
+  };
   const nav = [
     { id: "overview" as View, label: "Overview", icon: "grid" },
     { id: "topics" as View, label: "Topic map", icon: "layers" },
@@ -234,38 +354,43 @@ export default function Home() {
     { id: "progress" as View, label: "Progress", icon: "chart" },
   ];
 
+  if (!authReady || (authUser && !accountReady)) return <AuthLoading darkMode={darkMode} onToggleTheme={toggleDarkMode} />;
+  if (!authUser) return <AuthGate darkMode={darkMode} onToggleTheme={toggleDarkMode} onSignIn={signIn} />;
+  if (!connectedUsername) return <ProfileConnectGate darkMode={darkMode} onToggleTheme={toggleDarkMode} user={authUser} profileUrl={profileUrl} setProfileUrl={(value) => { setConnectError(""); setProfileUrl(value); }} syncing={syncing} error={connectError} onConnect={importProfile} onSignOut={signOutUser} />;
+
   return (
-    <main className="shell">
+    <main className={`shell ${darkMode ? "dark" : ""}`}>
       <aside className="sidebar">
-        <div className="brand"><div className="brand-mark">B</div><span>brainstorm</span></div>
+        <div className="brand"><span>brainstorm</span></div>
         <div className="profile-mini"><div className="avatar">P</div><div><strong>{profileName || "your profile"}</strong><span>Personal workspace</span></div><span className="online-dot" /></div>
         <nav className="nav-list" aria-label="Main navigation">
           <span className="nav-label">Workspace</span>
           {nav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? "active" : ""}`} onClick={() => setView(item.id)}><Icon name={item.icon} /><span>{item.label}</span>{item.badge ? <em>{item.badge}</em> : null}</button>)}
           <span className="nav-label second">Manage</span>
-          <button className="nav-item" onClick={() => flash("Settings will be available when Firebase is connected")}><Icon name="settings" /><span>Settings</span></button>
+          <button className={`nav-item ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><Icon name="settings" /><span>Settings</span></button>
         </nav>
-        <div className="sidebar-bottom"><div className="mini-progress"><div className="mini-progress-head"><span>Weekly goal</span><strong>12 / 20</strong></div><div className="progress-track"><span style={{ width: "60%" }} /></div><small>8 problems to go</small></div><div className="sidebar-foot"><span>v0.1 · local workspace</span><span className="status-dot" /> <span>Synced</span></div></div>
+        <div className="sidebar-bottom"><div className="mini-progress"><div className="mini-progress-head"><span>Weekly goal</span><strong>12 / 20</strong></div><div className="progress-track"><span style={{ width: "60%" }} /></div><small>8 problems to go</small></div><div className="sidebar-foot"><span>Private workspace</span><span className="status-dot" /> <span>Secure</span></div></div>
       </aside>
 
       <section className="content">
-        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><b>/</b><strong>{nav.find((item) => item.id === view)?.label}</strong></div><div className="top-actions"><div className="sync-status"><span className="status-dot" /> {synced ? "Synced just now" : "Demo workspace"}</div><button className="icon-button" aria-label="Search" onClick={() => document.getElementById("problem-search")?.focus()}><Icon name="search" /></button>{authUser ? <button className="account-button" onClick={signOutUser}><span className="top-avatar">{(authUser.displayName || "P").slice(0, 1)}</span><span>{authUser.displayName?.split(" ")[0] || "Account"}</span></button> : <button className="auth-button" onClick={signIn}>Sign in with Google</button>}</div></header>
+        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><b>/</b><strong>{view === "settings" ? "Settings" : nav.find((item) => item.id === view)?.label}</strong></div><div className="top-actions"><div className="sync-status"><span className="status-dot" /> {synced ? "Synced just now" : "Not synced"}</div><button className="icon-button" aria-label="Search" onClick={() => document.getElementById("problem-search")?.focus()}><Icon name="search" /></button><button className="theme-button" aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={toggleDarkMode}>{darkMode ? "☼" : "☾"}</button><button className="account-button" onClick={signOutUser}><span className="top-avatar">{(authUser.displayName || "P").slice(0, 1)}</span><span>{authUser.displayName?.split(" ")[0] || "Account"}</span></button></div></header>
 
         <div className="page-wrap">
-          <div className="page-heading"><div><p className="eyebrow">THURSDAY, SEPTEMBER 24, 2026</p><h1>{view === "overview" ? <>Good morning, Pranav <span className="wave">✦</span></> : nav.find((item) => item.id === view)?.label}</h1><p className="subheading">{view === "overview" ? "A clear view of where your problem-solving stands." : view === "topics" ? "See your patterns, coverage, and the gaps worth closing." : view === "revision" ? "Small, deliberate reviews turn solved into remembered." : "Measure the work that compounds over time."}</p></div><button className="primary-button" onClick={() => setView("revision")}><Icon name="refresh" /> Review due <span>{dueCount}</span></button></div>
+          <div className="page-heading"><div><p className="eyebrow">THURSDAY, SEPTEMBER 24, 2026</p><h1>{view === "overview" ? <>Good morning, {authUser.displayName?.split(" ")[0] || "there"} <span className="wave">✦</span></> : view === "settings" ? "Settings" : nav.find((item) => item.id === view)?.label}</h1><p className="subheading">{view === "overview" ? "A clear view of where your problem-solving stands." : view === "topics" ? "See your patterns, coverage, and the gaps worth closing." : view === "revision" ? "Small, deliberate reviews turn solved into remembered." : view === "progress" ? "Measure the work that compounds over time." : "Manage your Brainstorm account and connected profile."}</p></div>{view !== "settings" && <button className="primary-button" onClick={() => setView("revision")}><Icon name="refresh" /> Review due <span>{dueCount}</span></button>}</div>
 
           {view === "overview" && <>
-            <section className="connect-card"><div className="connect-copy"><div className="connect-icon"><Icon name="link" /></div><div><strong>Keep your LeetCode progress in sync</strong><p>Drop your public profile link and Brainstorm will organize your solved problems by topic.</p></div></div><div className="connect-form"><input aria-label="LeetCode profile URL" value={profileUrl} onChange={(event) => setProfileUrl(event.target.value)} /><button className="secondary-button" onClick={importProfile}>{syncing ? <><span className="spinner" /> Syncing</> : <><Icon name="refresh" /> Sync profile</>}</button></div></section>
-            <section className="metric-grid"><Metric label="Problems solved" value={String(solvedCount)} change={importedStats ? `${importedStats.easy} easy · ${importedStats.medium} medium · ${importedStats.hard} hard` : "+14 this month"} icon="check" tone="blue" /><Metric label="Topic mastery" value="68%" change="+6% this month" icon="target" tone="violet" /><Metric label="Due for revision" value={String(dueCount)} change="2 added today" icon="refresh" tone="orange" /><Metric label="Current streak" value={`${importedStats?.streak || 24} days`} change={importedStats ? `${importedStats.totalActiveDays} active days` : "Personal best: 31"} icon="fire" tone="green" /></section>
+            <section className="connect-card"><div className="connect-copy"><div className="connect-icon"><Icon name="link" /></div><div><strong>LeetCode profile connected</strong><p>Your profile is locked to this Brainstorm account. Refresh it whenever you want updated stats.</p></div></div><div className="connect-form"><div className="connected-profile"><span>Connected profile</span><strong>leetcode.com/u/{connectedUsername}</strong><small>Profile connection is locked</small></div><button className="secondary-button" onClick={importProfile}>{syncing ? <><span className="spinner" /> Syncing</> : <><Icon name="refresh" /> Refresh profile</>}</button></div></section>
+            <section className="metric-grid"><Metric label="Problems solved" value={String(solvedCount)} change={importedStats ? `${importedStats.easy} easy · ${importedStats.medium} medium · ${importedStats.hard} hard` : "Sync to load your data"} icon="check" tone="blue" /><Metric label="Topic mastery" value={topicMastery} change={isImported ? problems.length ? "Average confidence" : "LeetCode topics mapped" : "Waiting for sync"} icon="target" tone="violet" /><Metric label="Due for revision" value={String(dueCount)} change={isImported ? "From your tracked queue" : "Waiting for first review"} icon="refresh" tone="orange" /><Metric label="Current streak" value={`${importedStats?.streak || 0} days`} change={importedStats ? `${importedStats.totalActiveDays} active days` : "Sync to load your streak"} icon="fire" tone="green" /></section>
             <div className="section-row"><div className="section-title"><h2>Topic coverage</h2><span>What you’ve actually practiced</span></div><button className="text-button" onClick={() => setView("topics")}>View topic map <Icon name="arrow" /></button></div>
-            <section className="topic-grid">{topicData.slice(0, 4).map((topic) => <TopicCard key={topic.name} {...topic} />)}</section>
-            <div className="dashboard-columns"><section className="panel progress-panel"><div className="panel-heading"><div><h2>Practice rhythm</h2><span>Problems solved over the last 12 weeks</span></div><button className="select-button">Last 12 weeks <span>⌄</span></button></div><div className="chart"><div className="chart-y"><span>20</span><span>15</span><span>10</span><span>5</span><span>0</span></div><div className="chart-main"><div className="chart-lines"><i /><i /><i /><i /><i /></div><div className="bars">{[35, 44, 52, 29, 66, 48, 79, 57, 68, 74, 88, 96].map((height, index) => <div className="bar-wrap" key={index}><div className={`bar ${index === 11 ? "current" : ""}`} style={{ height: `${height}%` }} /><span>{["Jul 06", "Jul 13", "Jul 20", "Jul 27", "Aug 03", "Aug 10", "Aug 17", "Aug 24", "Aug 31", "Sep 07", "Sep 14", "Sep 21"][index]}</span></div>)}</div></div></div></section><section className="panel insight-panel"><div className="panel-heading"><div><h2>One useful insight</h2><span>Based on your recent activity</span></div><div className="sparkle">✦</div></div><div className="insight-body"><div className="insight-quote">You’re getting better at recognizing array patterns, but your recall drops after two weeks.</div><div className="insight-line"><div className="insight-icon orange"><Icon name="clock" /></div><div><strong>Try a 15-minute array recall session</strong><span>4 problems are waiting in your revision queue.</span></div></div><button className="full-button" onClick={() => setView("revision")}>Start recall session <Icon name="arrow" /></button></div></section></div>
-            <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent activity</h2><span>Your latest solved problems and reviews</span></div><button className="text-button" onClick={() => setView("progress")}>See all activity <Icon name="arrow" /></button></div><ProblemTable problems={problems.slice(0, 4)} onDifficultyChange={updateDifficulty} onReview={completeReview} compact /></section>
+            <section className="topic-grid">{dynamicTopics.length ? dynamicTopics.slice(0, 4).map((topic) => <TopicCard key={topic.name} {...topic} onClick={() => { setTopicFocus(topic.name); setView("topics"); }} />) : <div className="empty-data-card"><strong>No topic data yet</strong><span>Sync your public LeetCode profile to build a user-specific topic map.</span></div>}</section>
+            <div className="dashboard-columns"><section className="panel progress-panel"><div className="panel-heading"><div><h2>Practice rhythm</h2><span>{isImported ? "Your LeetCode activity over the last 12 weeks" : "Sync a profile to see your activity"}</span></div><button className="select-button">Last 12 weeks <span>⌄</span></button></div><div className="chart"><div className="chart-y"><span>{Math.max(...activityBars.map((bar) => bar.value), 0)}</span><span>{Math.ceil(Math.max(...activityBars.map((bar) => bar.value), 0) * .75)}</span><span>{Math.ceil(Math.max(...activityBars.map((bar) => bar.value), 0) * .5)}</span><span>{Math.ceil(Math.max(...activityBars.map((bar) => bar.value), 0) * .25)}</span><span>0</span></div><div className="chart-main"><div className="chart-lines"><i /><i /><i /><i /><i /></div><div className="bars">{activityBars.map((bar, index) => <div className="bar-wrap" key={bar.label}><div className={`bar ${index === activityBars.length - 1 ? "current" : ""}`} style={{ height: `${bar.height}%` }} /><span>{bar.label}</span></div>)}</div></div></div></section><section className="panel insight-panel"><div className="panel-heading"><div><h2>One useful insight</h2><span>{isImported ? "Based on your tracked problems" : "Waiting for your profile"}</span></div><div className="sparkle">✦</div></div><div className="insight-body"><div className="insight-quote">{isImported ? (dynamicTopics[0] ? `${dynamicTopics[0].name} is your most represented topic right now.` : "Your synced profile is ready for analysis.") : "Sync your public profile to turn activity into a personal learning signal."}</div><div className="insight-line"><div className="insight-icon orange"><Icon name="clock" /></div><div><strong>{isImported ? `${dueCount} problems are waiting for review` : "Connect your profile first"}</strong><span>{isImported ? "Keep the queue small and review consistently." : "Your account will begin tracking here."}</span></div></div><button className="full-button" onClick={() => setView(isImported ? "revision" : "overview")}>{isImported ? "Start recall session" : "Refresh profile"} <Icon name="arrow" /></button></div></section></div>
+            <section className="panel recent-panel"><div className="panel-heading"><div><h2>Recent activity</h2><span>Your latest solved problems and reviews</span></div><button className="text-button" onClick={() => setView("progress")}>See all activity <Icon name="arrow" /></button></div><ProblemTable problems={problems.slice(0, 4)} onDifficultyChange={updateDifficulty} onReview={completeReview} compact emptyMessage="No recent accepted problem titles were returned. Your profile totals and topic counts are still synced." /></section>
           </>}
 
-          {view === "topics" && <TopicView onBack={() => setView("overview")} />}
-          {view === "revision" && <section className="panel revision-view"><div className="panel-heading"><div><h2>Revision queue</h2><span>{dueCount} problems need your attention today.</span></div><div className="queue-filter">All topics <span>⌄</span></div></div><div className="revision-callout"><div className="callout-icon"><Icon name="target" /></div><div><strong>Recall before you reveal</strong><span>Try explaining the approach and complexity before opening your old solution.</span></div><span className="callout-count">{dueCount} due</span></div><ProblemTable problems={filteredProblems} onDifficultyChange={updateDifficulty} onReview={completeReview} /></section>}
-          {view === "progress" && <section className="progress-view"><div className="metric-grid"><Metric label="Total solved" value="157" change="Since Sep 2025" icon="check" tone="blue" /><Metric label="Independent solves" value="112" change="71% of total" icon="target" tone="violet" /><Metric label="Recall rate" value="84%" change="+9% this month" icon="refresh" tone="green" /><Metric label="Avg. solve time" value="31m" change="Down 6m this month" icon="clock" tone="orange" /></div><section className="panel progress-detail"><div className="panel-heading"><div><h2>Your progress over time</h2><span>Consistency beats intensity.</span></div></div><div className="big-progress"><div className="big-ring"><span>68<small>%</small></span></div><div className="big-progress-copy"><h3>Topic mastery</h3><p>You’ve built a strong base in arrays and strings. Graphs and dynamic programming are your highest-leverage next steps.</p><div className="legend"><span><i className="blue-dot" /> Strong foundation</span><span><i className="orange-dot" /> Needs attention</span></div></div></div></section><section className="panel recent-panel"><div className="panel-heading"><div><h2>All tracked problems</h2><span>Change the difficulty to match how the problem felt to you.</span></div><div className="search-box"><Icon name="search" /><input id="problem-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search problems or topics" /></div></div><ProblemTable problems={filteredProblems} onDifficultyChange={updateDifficulty} onReview={completeReview} /></section></section>}
+          {view === "topics" && <TopicView topics={dynamicTopics} problems={problems} focusedTopic={topicFocus} onFocus={setTopicFocus} onBack={() => setView("overview")} onDifficultyChange={updateDifficulty} onReview={completeReview} />}
+          {view === "revision" && <section className="panel revision-view"><div className="panel-heading"><div><h2>Revision queue</h2><span>{dueCount} problems need your attention today.</span></div><select className="queue-filter" value={revisionTopic} onChange={(event) => setRevisionTopic(event.target.value)}><option>All topics</option>{topicNames.map((topic) => <option key={topic}>{topic}</option>)}</select></div><div className="revision-callout"><div className="callout-icon"><Icon name="target" /></div><div><strong>Recall before you reveal</strong><span>Try explaining the approach and complexity before opening your old solution.</span></div><span className="callout-count">{revisionProblems.length} shown</span></div><ProblemTable problems={revisionProblems} onDifficultyChange={updateDifficulty} onReview={completeReview} emptyMessage="No recent accepted problem titles are available for revision yet. Solve a problem on LeetCode, then refresh your profile." /></section>}
+          {view === "progress" && <section className="progress-view"><div className="metric-grid"><Metric label="Total solved" value={String(solvedCount)} change={isImported ? "From your LeetCode profile" : "Sync to load your profile"} icon="check" tone="blue" /><Metric label="Tracked problems" value={String(problems.length)} change={isImported ? "Recent accepted submissions" : "Waiting for profile data"} icon="target" tone="violet" /><Metric label="Recall rate" value={isImported ? `${trackedMastery}%` : "—"} change={isImported ? "Average confidence" : "Review a problem to start"} icon="refresh" tone="green" /><Metric label="Active days" value={String(importedStats?.totalActiveDays || 0)} change={isImported ? "From your LeetCode calendar" : "Sync to load your calendar"} icon="clock" tone="orange" /></div><section className="panel progress-detail"><div className="panel-heading"><div><h2>Your progress over time</h2><span>{isImported ? "Derived from your synced LeetCode calendar and tracked reviews." : "Connect your profile to replace this with your own data."}</span></div></div><div className="big-progress"><div className="big-ring" style={{ background: `conic-gradient(var(--blue) 0 ${isImported ? trackedMastery : 0}%, #e9eef6 ${isImported ? trackedMastery : 0}% 100%)` }}><span>{isImported ? trackedMastery : 0}<small>%</small></span></div><div className="big-progress-copy"><h3>{isImported ? "Tracked recall mastery" : "No personal progress yet"}</h3><p>{isImported ? `This score is the average confidence across ${problems.length} tracked problems. Update confidence through revisions to make it more meaningful over time.` : "Sync your public LeetCode profile, then use the revision queue to build a personal progress history."}</p><div className="legend"><span><i className="blue-dot" /> Personal data</span><span><i className="orange-dot" /> Revision confidence</span></div></div></div></section><section className="panel recent-panel"><div className="panel-heading"><div><h2>All tracked problems</h2><span>Change the difficulty to match how the problem felt to you.</span></div><div className="search-box"><Icon name="search" /><input id="problem-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search problems or topics" /></div></div><ProblemTable problems={filteredProblems} onDifficultyChange={updateDifficulty} onReview={completeReview} emptyMessage="No tracked problem titles are available yet. Recent accepted submissions will appear here after your next profile refresh." /></section></section>}
+          {view === "settings" && <SettingsView user={authUser} connectedUsername={connectedUsername} onDeleteAccount={deleteBrainstormAccount} />}
         </div>
       </section>
       {toast && <div className="toast"><span className="toast-check"><Icon name="check" /></span>{toast}</div>}
@@ -277,15 +402,34 @@ function Metric({ label, value, change, icon, tone }: { label: string; value: st
   return <div className="metric-card"><div className={`metric-icon ${tone}`}><Icon name={icon} /></div><div className="metric-copy"><span>{label}</span><strong>{value}</strong><small><b>↗</b> {change}</small></div></div>;
 }
 
-function TopicCard({ name, count, total, color, trend }: { name: string; count: number; total: number; color: string; trend: string }) {
-  const progress = Math.round((count / total) * 100);
-  return <div className="topic-card"><div className="topic-head"><div className={`topic-dot ${color}`} /><strong>{name}</strong><span>{trend}</span></div><div className="topic-count"><strong>{count}</strong><span> / {total} problems</span><b>{progress}%</b></div><div className="progress-track topic-track"><span className={color} style={{ width: `${progress}%` }} /></div></div>;
+function AuthLoading({ darkMode, onToggleTheme }: { darkMode: boolean; onToggleTheme: () => void }) {
+  return <main className={`auth-shell ${darkMode ? "dark" : ""}`}><button className="theme-button auth-theme" aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={onToggleTheme}>{darkMode ? "☼" : "☾"}</button><div className="auth-card loading-card"><div className="auth-brand">brainstorm</div><div className="auth-spinner" /><p>Preparing your private workspace…</p></div></main>;
 }
 
-function ProblemTable({ problems, onDifficultyChange, onReview, compact = false }: { problems: Problem[]; onDifficultyChange: (id: number, difficulty: Difficulty) => void; onReview: (id: number) => void; compact?: boolean }) {
-  return <div className={`problem-table ${compact ? "compact" : ""}`}><div className="table-row table-header"><span>Problem</span><span>Topics</span><span>Your difficulty</span><span>Last solved</span><span>Next review</span><span /></div>{problems.map((problem) => <div className="table-row" key={problem.id}><div className="problem-name"><div className="problem-number">{String(problem.id).padStart(2, "0")}</div><div><strong>{problem.title}</strong><span>{problem.leetDifficulty} on LeetCode</span></div></div><div className="table-topics">{problem.topics.slice(0, 2).map((topic) => <span key={topic}>{topic}</span>)}</div><select className={`difficulty ${problem.personalDifficulty.toLowerCase()}`} value={problem.personalDifficulty} onChange={(event) => onDifficultyChange(problem.id, event.target.value as Difficulty)} aria-label={`Personal difficulty for ${problem.title}`}><option>Easy</option><option>Medium</option><option>Hard</option></select><span className="muted-cell">{problem.lastSolved}</span><span className={`review-cell ${problem.status === "Due today" ? "due" : ""}`}>{problem.nextReview}</span><div className="row-action">{!problem.reviewed && (problem.status === "Due today" || problem.status === "Due soon") ? <button className="review-button" onClick={() => onReview(problem.id)}>Review</button> : <span className="reviewed"><Icon name="check" /> Reviewed</span>}</div></div>)}{problems.length === 0 && <div className="empty-state">No problems match your search.</div>}</div>;
+function AuthGate({ darkMode, onToggleTheme, onSignIn }: { darkMode: boolean; onToggleTheme: () => void; onSignIn: () => void }) {
+  return <main className={`auth-shell ${darkMode ? "dark" : ""}`}><button className="theme-button auth-theme" aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={onToggleTheme}>{darkMode ? "☼" : "☾"}</button><div className="auth-card"><div className="auth-brand">brainstorm</div><p className="eyebrow">YOUR PROBLEM-SOLVING OS</p><h1>Make every solved problem count.</h1><p className="auth-copy">Organize your LeetCode progress by topic, remember what you solved, and build a revision habit that compounds.</p><button className="google-button" onClick={onSignIn}><span className="google-g">G</span> Continue with Google <Icon name="arrow" /></button><small>Brainstorm uses Google only for account access. Your LeetCode profile is connected separately after sign-in.</small></div></main>;
 }
 
-function TopicView({ onBack }: { onBack: () => void }) {
-  return <section className="topic-view"><div className="topic-view-head"><div><p className="eyebrow">YOUR KNOWLEDGE MAP</p><h2>Patterns, not just problem counts.</h2><p className="subheading">A topic is becoming a strength when you can recognize it, explain it, and recall it later.</p></div><button className="secondary-button" onClick={onBack}>Back to overview</button></div><div className="topic-grid full">{topicData.map((topic) => <TopicCard key={topic.name} {...topic} />)}</div><div className="dashboard-columns"><section className="panel weakness-panel"><div className="panel-heading"><div><h2>Highest-leverage gaps</h2><span>Where your next hour will compound most.</span></div></div>{[{ name: "Dynamic Programming", value: "27%", text: "8 of 30 practiced", color: "pink" }, { name: "Graphs", value: "34%", text: "12 of 35 practiced", color: "green" }, { name: "Trees", value: "48%", text: "19 of 40 practiced", color: "orange" }].map((item) => <div className="weakness-row" key={item.name}><div className={`topic-dot ${item.color}`} /><div className="weakness-copy"><strong>{item.name}</strong><span>{item.text}</span></div><b>{item.value}</b><button className="small-arrow"><Icon name="arrow" /></button></div>)}</section><section className="panel pattern-panel"><div className="panel-heading"><div><h2>Pattern fluency</h2><span>Your confidence by technique</span></div></div><div className="pattern-list">{[["Sliding window", 84], ["Two pointers", 78], ["Binary search", 65], ["DFS / BFS", 51], ["Dynamic programming", 32]].map(([name, value]) => <div className="pattern-row" key={String(name)}><span>{name}</span><div className="progress-track"><i style={{ width: `${value}%` }} /></div><b>{value}%</b></div>)}</div></section></div></section>;
+function ProfileConnectGate({ darkMode, onToggleTheme, user, profileUrl, setProfileUrl, syncing, error, onConnect, onSignOut }: { darkMode: boolean; onToggleTheme: () => void; user: User; profileUrl: string; setProfileUrl: (value: string) => void; syncing: boolean; error: string; onConnect: () => void; onSignOut: () => void }) {
+  return <main className={`auth-shell ${darkMode ? "dark" : ""}`}><button className="theme-button auth-theme" aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={onToggleTheme}>{darkMode ? "☼" : "☾"}</button><div className="auth-card profile-card"><div className="auth-brand">brainstorm</div><p className="eyebrow">ONE-TIME CONNECTION</p><h1>Connect your LeetCode profile.</h1><p className="auth-copy">Welcome, {user.displayName?.split(" ")[0] || "there"}. Enter your public profile URL once. Brainstorm will lock it to this account and keep your stats refreshable.</p><label htmlFor="first-profile-url">LeetCode profile URL</label><input id="first-profile-url" value={profileUrl} onChange={(event) => setProfileUrl(event.target.value)} placeholder="Paste your public LeetCode profile URL" autoComplete="off" />{error && <div className="form-error" role="alert">{error}</div>}<button className="google-button connect-first-button" onClick={onConnect} disabled={syncing}>{syncing ? <><span className="spinner" /> Connecting…</> : <>Connect profile <Icon name="arrow" /></>}</button><p className="lock-note">After connection, this profile cannot be unsynced. You can refresh its data or delete your Brainstorm account from Settings.</p><button className="plain-button" onClick={onSignOut}>Use a different Google account</button></div></main>;
+}
+
+function SettingsView({ user, connectedUsername, onDeleteAccount }: { user: User; connectedUsername: string | null; onDeleteAccount: () => void }) {
+  return <section className="settings-view"><section className="panel settings-card"><div className="settings-header"><div><p className="eyebrow">ACCOUNT</p><h2>Settings</h2><p className="subheading">Your Brainstorm account and connection details.</p></div></div><div className="settings-row"><div><span className="settings-label">Google account</span><strong>{user.email || user.displayName || "Connected account"}</strong></div><span className="settings-pill">Connected</span></div><div className="settings-row"><div><span className="settings-label">LeetCode profile</span><strong>leetcode.com/u/{connectedUsername}</strong><small>Locked after the first connection. Refresh from Overview.</small></div><span className="settings-pill">Locked</span></div></section><section className="panel danger-card"><p className="eyebrow">DANGER ZONE</p><h2>Delete Brainstorm account</h2><p>This permanently deletes your Brainstorm profile, imported problems, revision history, notes, and settings. Your LeetCode account is not affected.</p><button className="delete-button" onClick={onDeleteAccount}>Delete my Brainstorm account</button></section></section>;
+}
+
+function TopicCard({ name, count, total, color, trend, label = "problems", percentage, percentageLabel, onClick }: { name: string; count: number; total: number; color: string; trend: string; label?: string; percentage?: number; percentageLabel?: string; onClick?: () => void }) {
+  const progress = percentage ?? Math.round((count / total) * 100);
+  return <button className={`topic-card ${onClick ? "clickable" : ""}`} onClick={onClick}><div className="topic-head"><div className={`topic-dot ${color}`} /><strong>{name}</strong><span>{trend}</span></div><div className="topic-count"><strong>{count}</strong><span>{label === "solved" ? " solved" : ` / ${total} ${label}`}</span><b>{percentageLabel || `${progress}%`}</b></div><div className="progress-track topic-track"><span className={color} style={{ width: `${progress}%` }} /></div></button>;
+}
+
+function ProblemTable({ problems, onDifficultyChange, onReview, compact = false, emptyMessage = "No problems match your search." }: { problems: Problem[]; onDifficultyChange: (id: number, difficulty: Difficulty) => void; onReview: (id: number) => void; compact?: boolean; emptyMessage?: string }) {
+  return <div className={`problem-table ${compact ? "compact" : ""}`}><div className="table-row table-header"><span>Problem</span><span>Topics</span><span>Your difficulty</span><span>Last solved</span><span>Next review</span><span /></div>{problems.map((problem) => <div className="table-row" key={problem.id}><div className="problem-name"><div className="problem-number">{String(problem.id).padStart(2, "0")}</div><div><strong>{problem.title}</strong><span>{problem.leetDifficulty} on LeetCode</span></div></div><div className="table-topics">{problem.topics.slice(0, 2).map((topic) => <span key={topic}>{topic}</span>)}</div><select className={`difficulty ${problem.personalDifficulty.toLowerCase()}`} value={problem.personalDifficulty} onChange={(event) => onDifficultyChange(problem.id, event.target.value as Difficulty)} aria-label={`Personal difficulty for ${problem.title}`}><option>Easy</option><option>Medium</option><option>Hard</option></select><span className="muted-cell">{problem.lastSolved}</span><span className={`review-cell ${problem.status === "Due today" ? "due" : ""}`}>{problem.nextReview}</span><div className="row-action">{!problem.reviewed && (problem.status === "Due today" || problem.status === "Due soon") ? <button className="review-button" onClick={() => onReview(problem.id)}>Review</button> : <span className="reviewed"><Icon name="check" /> Reviewed</span>}</div></div>)}{problems.length === 0 && <div className="empty-state">{emptyMessage}</div>}</div>;
+}
+
+function TopicView({ topics, problems, focusedTopic, onFocus, onBack, onDifficultyChange, onReview }: { topics: Array<{ name: string; count: number; total: number; color: string; trend: string; label?: string; percentage?: number; percentageLabel?: string }>; problems: Problem[]; focusedTopic: string | null; onFocus: (topic: string | null) => void; onBack: () => void; onDifficultyChange: (id: number, difficulty: Difficulty) => void; onReview: (id: number) => void }) {
+  const gaps = topics.slice().sort((a, b) => ((a.percentage ?? (a.count / a.total) * 100) - (b.percentage ?? (b.count / b.total) * 100))).slice(0, 3);
+  const selectedProblems = focusedTopic ? problems.filter((problem) => problem.topics.includes(focusedTopic)) : [];
+  const gapPercentage = (topic: typeof topics[number]) => Math.round(topic.percentage ?? (topic.count / topic.total) * 100);
+  return <section className="topic-view"><div className="topic-view-head"><div><p className="eyebrow">YOUR KNOWLEDGE MAP</p><h2>Patterns, not just problem counts.</h2><p className="subheading">A topic is becoming a strength when you can recognize it, explain it, and recall it later.</p></div><button className="secondary-button" onClick={onBack}>Back to overview</button></div>{topics.length ? <><div className="topic-grid full">{topics.map((topic) => <TopicCard key={topic.name} {...topic} onClick={() => onFocus(topic.name)} />)}</div><div className="dashboard-columns"><section className="panel weakness-panel"><div className="panel-heading"><div><h2>Topics to strengthen</h2><span>Lower-volume topics are surfaced first. Click one to inspect available recent solves.</span></div></div>{gaps.map((item) => <button className="weakness-row" key={item.name} onClick={() => onFocus(item.name)}><div className={`topic-dot ${item.color}`} /><div className="weakness-copy"><strong>{item.name}</strong><span>{item.count} solved on LeetCode · {item.percentageLabel || `${gapPercentage(item)}% relative volume`}</span></div><b>{item.percentageLabel || `${gapPercentage(item)}%`}</b><span className="small-arrow"><Icon name="arrow" /></span></button>)}</section><section className="panel pattern-panel"><div className="panel-heading"><div><h2>Topic volume</h2><span>Relative distribution of your solved problems by topic</span></div></div><div className="pattern-list">{topics.slice(0, 5).map((topic) => <div className="pattern-row" key={topic.name}><span>{topic.name}</span><div className="progress-track"><i style={{ width: `${gapPercentage(topic)}%` }} /></div><b>{topic.count}</b></div>)}</div></section></div>{focusedTopic && <section className="panel topic-problems"><div className="panel-heading"><div><h2>{focusedTopic}</h2><span>{selectedProblems.length ? `${selectedProblems.length} recent accepted solves shown` : "No recent accepted problem titles were returned for this topic"}</span></div><button className="text-button" onClick={() => onFocus(null)}>Clear selection</button></div>{selectedProblems.length ? <ProblemTable problems={selectedProblems} onDifficultyChange={onDifficultyChange} onReview={onReview} /> : <div className="empty-state">LeetCode exposes full topic totals publicly, but its public profile API only exposes a limited recent accepted-submission list. Refresh after solving a new problem, or add older solved problems manually to track them for revision.</div>}</section>}</> : <div className="empty-data-card topic-empty"><strong>Sync a profile to build your knowledge map</strong><span>The topic cards and leverage gaps will be generated from your own imported problems.</span></div>}</section>;
 }

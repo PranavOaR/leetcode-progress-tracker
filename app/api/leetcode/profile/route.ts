@@ -35,6 +35,11 @@ const profileQuery = `
       username
       profile { realName userAvatar ranking }
       submitStatsGlobal { acSubmissionNum { difficulty count submissions } }
+      tagProblemCounts {
+        fundamental { tagName tagSlug problemsSolved }
+        intermediate { tagName tagSlug problemsSolved }
+        advanced { tagName tagSlug problemsSolved }
+      }
       userCalendar(year: $year) { streak totalActiveDays submissionCalendar }
     }
   }
@@ -65,13 +70,14 @@ export async function GET(request: NextRequest) {
 
   try {
     const [profile, recent] = await Promise.all([
-      queryLeetCode<{ matchedUser: { username: string; profile: { realName: string | null; userAvatar: string | null; ranking: number | null }; submitStatsGlobal: { acSubmissionNum: Array<{ difficulty: string; count: number; submissions?: number }> }; userCalendar: { streak: number; totalActiveDays: number; submissionCalendar: string } | null } | null }>(profileQuery, { username, year: new Date().getFullYear() }),
+      queryLeetCode<{ matchedUser: { username: string; profile: { realName: string | null; userAvatar: string | null; ranking: number | null }; submitStatsGlobal: { acSubmissionNum: Array<{ difficulty: string; count: number; submissions?: number }> }; tagProblemCounts: { fundamental: Array<{ tagName: string; tagSlug: string; problemsSolved: number }>; intermediate: Array<{ tagName: string; tagSlug: string; problemsSolved: number }>; advanced: Array<{ tagName: string; tagSlug: string; problemsSolved: number }> }; userCalendar: { streak: number; totalActiveDays: number; submissionCalendar: string } | null } | null }>(profileQuery, { username, year: new Date().getFullYear() }),
       queryLeetCode<{ recentAcSubmissionList: Array<{ id: string; title: string; titleSlug: string; timestamp: string }> }>(recentQuery, { username, limit: 25 }),
     ]);
 
     if (!profile.matchedUser) return NextResponse.json({ error: `No public LeetCode profile was found for ${username}.` }, { status: 404 });
 
-    const recentProblems = await Promise.all((recent.recentAcSubmissionList || []).map(async (submission) => {
+    const uniqueSubmissions = Array.from(new Map((recent.recentAcSubmissionList || []).map((submission) => [submission.titleSlug, submission])).values());
+    const recentProblems = await Promise.all(uniqueSubmissions.map(async (submission) => {
       try {
         const detail = await queryLeetCode<{ question: { questionFrontendId: string; title: string; titleSlug: string; difficulty: string; topicTags: Array<{ name: string; slug: string }> } | null }>(questionQuery, { titleSlug: submission.titleSlug });
         return { ...submission, question: detail.question };
@@ -81,6 +87,11 @@ export async function GET(request: NextRequest) {
     }));
 
     const accepted = profile.matchedUser.submitStatsGlobal.acSubmissionNum;
+    const topicStats = [
+      ...profile.matchedUser.tagProblemCounts.fundamental,
+      ...profile.matchedUser.tagProblemCounts.intermediate,
+      ...profile.matchedUser.tagProblemCounts.advanced,
+    ].map((topic) => ({ name: topic.tagName, slug: topic.tagSlug, solved: topic.problemsSolved }));
     return NextResponse.json({
       username: profile.matchedUser.username,
       profile: profile.matchedUser.profile,
@@ -92,6 +103,7 @@ export async function GET(request: NextRequest) {
         streak: profile.matchedUser.userCalendar?.streak || 0,
         totalActiveDays: profile.matchedUser.userCalendar?.totalActiveDays || 0,
         submissionCalendar: profile.matchedUser.userCalendar?.submissionCalendar || "{}",
+        topicStats,
       },
       recentProblems: recentProblems.map((item) => ({
         id: item.question?.questionFrontendId || item.id,
