@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brainstorm</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="popup-header">
+        <div>
+          <div class="brand">brainstorm</div>
+          <span class="eyebrow">LEETCODE COMPANION</span>
+        </div>
+        <span class="status-dot" id="status-dot"></span>
+      </header>
+
+      <section class="profile-section">
+        <label for="profile-url">LeetCode profile</label>
+        <input id="profile-url" placeholder="Paste your public profile URL" autocomplete="off" />
+        <label for="site-url">Brainstorm site</label>
+        <input id="site-url" placeholder="http://localhost:3000" autocomplete="off" />
+      </section>
+
+      <section class="metrics" id="metrics" hidden>
+        <div><strong id="solved">—</strong><span>solved</span></div>
+        <div><strong id="streak">—</strong><span>streak</span></div>
+        <div><strong id="topics">—</strong><span>topics</span></div>
+        <div><strong id="recent">—</strong><span>recent</span></div>
+      </section>
+
+      <p class="message" id="message">Add your profile URL to see your snapshot.</p>
+
+      <div class="actions">
+        <button class="primary" id="sync">Sync progress</button>
+        <button class="secondary" id="send" disabled>Send to Brainstorm</button>
+        <button class="link-button" id="open">Open full dashboard</button>
+      </div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

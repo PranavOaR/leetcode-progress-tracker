@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Brainstorm — LeetCode companion",
+  "version": "0.1.0",
+  "description": "See a compact Brainstorm progress snapshot and send profile data to your personal workspace.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://leetcode.com/*",
+    "http://localhost:3000/*",
+    "https://*.vercel.app/*"
+  ],
+  "action": {
+    "default_title": "Brainstorm",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:3000/extension/*",
+        "https://*.vercel.app/extension/*"
+      ],
+      "js": ["site-bridge.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
