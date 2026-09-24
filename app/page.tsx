@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { GoogleAuthProvider, deleteUser, onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import { FirebaseError } from "firebase/app";
+import { GoogleAuthProvider, deleteUser, getRedirectResult, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, type User } from "firebase/auth";
 import { collection, deleteDoc, doc, getDoc, getDocs, setDoc, writeBatch } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 
@@ -118,6 +119,7 @@ export default function Home() {
   const [synced, setSynced] = useState(false);
   const [search, setSearch] = useState("");
   const [toast, setToast] = useState("");
+  const [authError, setAuthError] = useState("");
   const [connectError, setConnectError] = useState("");
   const [revisionTopic, setRevisionTopic] = useState("All topics");
   const [topicFocus, setTopicFocus] = useState<string | null>(null);
@@ -151,6 +153,16 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    void getRedirectResult(auth).catch((error: unknown) => {
+      const code = error instanceof FirebaseError ? error.code : "";
+      if (code === "auth/unauthorized-domain") {
+        setAuthError("This deployment domain is not authorized in Firebase. Add the Vercel domain under Firebase Authentication → Settings → Authorized domains.");
+      } else if (code === "auth/operation-not-allowed") {
+        setAuthError("Google sign-in is not enabled for this Firebase project.");
+      } else if (code && code !== "auth/popup-closed-by-user") {
+        setAuthError(error instanceof Error ? error.message : "Google sign-in could not be completed.");
+      }
+    });
     const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
       window.setTimeout(() => {
         setAuthUser(nextUser);
@@ -220,11 +232,35 @@ export default function Home() {
   };
 
   const signIn = async () => {
+    setAuthError("");
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
     try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
+      await signInWithPopup(auth, provider);
       flash("Google account connected");
-    } catch {
-      flash("Google sign-in was cancelled or unavailable");
+    } catch (error: unknown) {
+      const code = error instanceof FirebaseError ? error.code : "";
+      if (code === "auth/popup-blocked" || code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
+        setAuthError("The Google popup could not stay open. Continuing with secure redirect sign-in…");
+        try {
+          await signInWithRedirect(auth, provider);
+          return;
+        } catch (redirectError: unknown) {
+          const redirectCode = redirectError instanceof FirebaseError ? redirectError.code : "";
+          setAuthError(redirectCode === "auth/unauthorized-domain"
+            ? "This deployment domain is not authorized in Firebase. Add the Vercel domain under Firebase Authentication → Settings → Authorized domains."
+            : redirectError instanceof Error ? redirectError.message : "Google sign-in could not be completed.");
+        }
+      } else if (code === "auth/unauthorized-domain") {
+        setAuthError("This deployment domain is not authorized in Firebase. Add the Vercel domain under Firebase Authentication → Settings → Authorized domains.");
+      } else if (code === "auth/operation-not-allowed") {
+        setAuthError("Google sign-in is not enabled for this Firebase project.");
+      } else if (code === "auth/invalid-api-key") {
+        setAuthError("Firebase rejected the web API key. Check the Vercel NEXT_PUBLIC_FIREBASE_API_KEY value and redeploy.");
+      } else {
+        setAuthError(error instanceof Error ? error.message : "Google sign-in was cancelled or unavailable.");
+      }
+      flash("Google sign-in needs attention");
     }
   };
 
@@ -355,7 +391,7 @@ export default function Home() {
   ];
 
   if (!authReady || (authUser && !accountReady)) return <AuthLoading darkMode={darkMode} onToggleTheme={toggleDarkMode} />;
-  if (!authUser) return <AuthGate darkMode={darkMode} onToggleTheme={toggleDarkMode} onSignIn={signIn} />;
+  if (!authUser) return <AuthGate darkMode={darkMode} error={authError} onToggleTheme={toggleDarkMode} onSignIn={signIn} />;
   if (!connectedUsername) return <ProfileConnectGate darkMode={darkMode} onToggleTheme={toggleDarkMode} user={authUser} profileUrl={profileUrl} setProfileUrl={(value) => { setConnectError(""); setProfileUrl(value); }} syncing={syncing} error={connectError} onConnect={importProfile} onSignOut={signOutUser} />;
 
   return (
@@ -406,8 +442,8 @@ function AuthLoading({ darkMode, onToggleTheme }: { darkMode: boolean; onToggleT
   return <main className={`auth-shell ${darkMode ? "dark" : ""}`}><button className="theme-button auth-theme" aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={onToggleTheme}>{darkMode ? "☼" : "☾"}</button><div className="auth-card loading-card"><div className="auth-brand">brainstorm</div><div className="auth-spinner" /><p>Preparing your private workspace…</p></div></main>;
 }
 
-function AuthGate({ darkMode, onToggleTheme, onSignIn }: { darkMode: boolean; onToggleTheme: () => void; onSignIn: () => void }) {
-  return <main className={`auth-shell ${darkMode ? "dark" : ""}`}><button className="theme-button auth-theme" aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={onToggleTheme}>{darkMode ? "☼" : "☾"}</button><div className="auth-card"><div className="auth-brand">brainstorm</div><p className="eyebrow">YOUR PROBLEM-SOLVING OS</p><h1>Make every solved problem count.</h1><p className="auth-copy">Organize your LeetCode progress by topic, remember what you solved, and build a revision habit that compounds.</p><button className="google-button" onClick={onSignIn}><span className="google-g">G</span> Continue with Google <Icon name="arrow" /></button><small>Brainstorm uses Google only for account access. Your LeetCode profile is connected separately after sign-in.</small></div></main>;
+function AuthGate({ darkMode, error, onToggleTheme, onSignIn }: { darkMode: boolean; error: string; onToggleTheme: () => void; onSignIn: () => void }) {
+  return <main className={`auth-shell ${darkMode ? "dark" : ""}`}><button className="theme-button auth-theme" aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={onToggleTheme}>{darkMode ? "☼" : "☾"}</button><div className="auth-card"><div className="auth-brand">brainstorm</div><p className="eyebrow">YOUR PROBLEM-SOLVING OS</p><h1>Make every solved problem count.</h1><p className="auth-copy">Organize your LeetCode progress by topic, remember what you solved, and build a revision habit that compounds.</p><button className="google-button" onClick={onSignIn}><span className="google-g">G</span> Continue with Google <Icon name="arrow" /></button>{error && <div className="form-error" role="alert">{error}</div>}<small>Brainstorm uses Google only for account access. Your LeetCode profile is connected separately after sign-in.</small></div></main>;
 }
 
 function ProfileConnectGate({ darkMode, onToggleTheme, user, profileUrl, setProfileUrl, syncing, error, onConnect, onSignOut }: { darkMode: boolean; onToggleTheme: () => void; user: User; profileUrl: string; setProfileUrl: (value: string) => void; syncing: boolean; error: string; onConnect: () => void; onSignOut: () => void }) {
